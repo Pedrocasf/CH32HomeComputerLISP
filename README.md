@@ -7,8 +7,8 @@ the MCU, and keyboard input can be controlled with the `ch32fun` single-wire mon
 This is a toy / proof-of-concept.
 
 Credits to similar projects:
-[Lucas Hartmann ch32v003_cvbs](https://github.com/lhartmann/ch32v003_cvbs)
-[Olimex RVPC](https://github.com/OLIMEX/RVPC)
+- [Olimex RVPC](https://github.com/OLIMEX/RVPC)
+- [Lucas Hartmann ch32v003_cvbs](https://github.com/lhartmann/ch32v003_cvbs)
 
 ## Demo Videos
 
