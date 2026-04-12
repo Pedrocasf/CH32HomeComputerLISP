@@ -1,0 +1,11 @@
+*.bin
+*.elf
+*.elf.ltrans0.ltrans.su
+*.ext.bin
+*.hex
+*.lst
+*.map
+*_ext.bin
+
+.DS_Store
+Thumbs.db
