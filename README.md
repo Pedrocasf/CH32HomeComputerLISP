@@ -4,13 +4,23 @@
 with a built-in line-numbered BASIC interpreter. Video is generated directly by
 the MCU, and keyboard input can be controlled with the `ch32fun` single-wire monitor.
 
+This is a toy / proof-of-concept.
+
+Credits to similar projects:
+[Lucas Hartmann ch32v003_cvbs](https://github.com/lhartmann/ch32v003_cvbs)
+[Olimex RVPC](https://github.com/OLIMEX/RVPC)
+
 ## Demo Videos
 
-- [General BASIC demo](videos/V003_Basic_demo.mp4)
+### General BASIC demo
+
+https://github.com/user-attachments/assets/b10c93e7-f365-4a17-907d-5192cda7ffc1
 
 ## Hardware
 
-<img src="hardware.jpg" alt="V003 Home Computer hardware photo" width="50%">
+<p align="center">
+  <img src="hardware.jpg" alt="V003 Home Computer hardware photo" width="50%">
+</p>
 
 The video output is a simple 2-resistor passive DAC into a standard `75 ohm`
 composite input.
@@ -122,20 +132,20 @@ RUN
 
 Beware: Its barely usable due to very limited code space. The stack tends to overflow into the screen buffer for more complex programs.
 
-
 ## Jitter issues
 
 Using an external crystal oscillator and the PLL gives the best video quality. The internal RC oscillator of the V003 is also still somewhat acceptable, but unfortunately the jitter of the V002 makes is unusable for video output.
 
-See examples below:
-
 ### V003 with crystal oscillator
-- [V003 with crystal oscillator](videos/V003_Xtal.mp4)
+
+https://github.com/user-attachments/assets/086e5b53-5dc3-4463-9c60-cd76ee690dd8
+
 ### V003 with internal RC oscillator
-- [V003 with RC oscillator](videos/V003_RC_oscillator.mp4)
+
+https://github.com/user-attachments/assets/04abdd89-ef49-42d3-b3cd-2402bff34749
+
 ### V002 with internal RC oscillator
-- [V002 with RC oscillator](videos/V002_RC_oscillator.mp4)
 
-Note that due to the extra flash wait state at 48 MHz, the V002 has about `30%` fewer cycles available per frame than the V003. (The "idle" numbers shown in the videos)
+https://github.com/user-attachments/assets/87767ca5-65b7-4b2a-8664-631ab7eab93e
 
-
+Note that at `48 MHz`, the `V003` has about `50%` more cycles available per frame than the `V002`, because it needs one less flash wait state. You can see that in the `IDLE` numbers shown in the videos.
