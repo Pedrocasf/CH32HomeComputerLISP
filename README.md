@@ -34,6 +34,11 @@ composite input.
 This project requires a `CH32V003` package that exposes both `PC4` and `PC6`. 
 SOIC8 does not.
 
+Why analog video? It's more authentic and the lower number of lines compared to VGA free up
+a lot of processing time. 
+
+You can actually get a composite to USB adapter very cheaply online (that's what i used for development). No need to find an old TV.
+
 ## Firmware Architecture
 
 The firmware is split into four small modules:
