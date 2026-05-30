@@ -227,7 +227,7 @@ void console_show_boot_banner(void)
 {
     console_clear_screen();
     console_print_centered_line("*** CH32 BASIC V.1 32X25 ***");
-    console_print_centered_line("TEXT MODE 640 BASIC BYTES FREE");
+    console_print_centered_line("TEXT MODE 2048 BASIC BYTES FREE");
     console_print_line("");
     console_print_line("READY.");
     console_prepare_input_row();

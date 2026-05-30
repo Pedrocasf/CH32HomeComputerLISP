@@ -1,8 +1,8 @@
 all : flash
 
 TARGET:=main
-TARGET_MCU:=CH32V003
-ADDITIONAL_C_FILES:=video_textmode.c console_textmode.c basic_runtime.c
+TARGET_MCU:=CH32V002
+ADDITIONAL_C_FILES:=video_textmode.c console_textmode.c lisp_runtime.c
 CH32FUN_PATH ?= ./ch32fun
 
 ifeq ("$(wildcard $(CH32FUN_PATH)/ch32fun/ch32fun.mk)","")
