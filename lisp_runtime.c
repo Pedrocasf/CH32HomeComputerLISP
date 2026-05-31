@@ -10,28 +10,29 @@ static uint8_t lisp_program_running;
 static uint8_t lisp_break_reqiuested;
 static char* l;
 static char* p;
-uint16_t ram[1024];
-#define sNil  "NIL"
-#define sT  "T"
-#define sDefine "DEFINE"
-#define sCond  "COND"
-#define sQuote  "QUOTE"
-#define sCAR "CAR"
-#define sCDR  "CDR"
-#define sCons  "CONS"
-#define sEQ  "EQ"
-#define sAtom  "ATOM"
+int16_t ram[1024];
+int16_t char_lookahead;
+#define kNil  "NIL"
+#define kT  "T"
+#define kDefine "DEFINE"
+#define kCond  "COND"
+#define kQuote  "QUOTE"
+#define kCAR "CAR"
+#define kCDR  "CDR"
+#define kCons  "CONS"
+#define kEQ  "EQ"
+#define kAtom  "ATOM"
 const char* S[] = {
-    sNil,
-    sT,
-    sDefine,
-    sCond,
-    sQuote,
-    sCAR,
-    sCDR,
-    sCons,
-    sEQ,
-    sAtom,
+    kNil,
+    kT,
+    kDefine,
+    kCond,
+    kQuote,
+    kCAR,
+    kCDR,
+    kCons,
+    kEQ,
+    kAtom,
 };
 char get_char(){
 
