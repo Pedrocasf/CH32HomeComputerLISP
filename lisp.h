@@ -33,9 +33,14 @@
 #define MAXDEPTH 14
 #endif
 
-/* GC safepoint trigger: collect when the heap is more than 7/8 full. */
-#define GC_NUM 7
-#define GC_DEN 8
+/* The collector treats a long symbol's {hi, lo} cell as raw data, but a
+ * stale copy of a reference to one can still be picked up by the
+ * conservative stack scan and traced as if it were a cons. Both halves are
+ * always >= 1600, so the indices they would decode to (>= 400) must stay
+ * outside the heap for that to be harmless. */
+#if NCELLS > 400
+#error "NCELLS > 400: raw SYM2 halves could decode to a valid cell index"
+#endif
 
 /* A val is a 16-bit tagged word:
  *   xxxxxxxxxxxxxxx1  fixnum, signed 15-bit payload    -16384..16383
@@ -81,10 +86,16 @@ typedef struct {
 /* Markers: the car of a heap cell that is not a cons */
 #define SYM_MARK  IMM(SUB_MK, 0)            /* cdr = packed name, <= 3 chars */
 #define CLO_MARK  IMM(SUB_MK, 1)            /* cdr = (params body . env)     */
-#define FWD_MARK  IMM(SUB_MK, 2)            /* cdr = new location, GC only   */
+#define FREE_MARK IMM(SUB_MK, 2)            /* cell is on the free list      */
 #define SYM2_MARK IMM(SUB_MK, 3)            /* cdr -> {hi, lo}, 4..6 chars   */
 
 void lisp_init(void);
+
+/* Highest address the C stack occupies. The collector scans from its own
+ * frame up to here looking for references, so this must be set once at
+ * startup before any Lisp runs. */
+void lisp_set_stack_top(void *top);
+
 void lisp_print(val v);
 void lisp_handle_input_line(const char *line);
 void lisp_handle_screen(void);          /* Ctrl-R: run the whole screen */

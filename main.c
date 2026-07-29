@@ -52,6 +52,13 @@ int main(void)
     console_init();
 
 #if USE_LISP
+    /* The collector scans the C stack for roots, so it needs to know where
+     * that stack ends. ch32fun's linker script puts the top at _eusrstack. */
+    {
+        extern uint32_t _eusrstack;
+        lisp_set_stack_top(&_eusrstack);
+    }
+
     lisp_init();
     console_clear_screen();
     console_print_line("  *** CH32 LISP V.1 32X25 ***");

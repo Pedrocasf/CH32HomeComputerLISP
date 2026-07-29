@@ -10,18 +10,22 @@ static void lisp_error(const char *msg);
  * than setjmp: nothing needs unwinding, and setjmp stays out of the image. */
 static const char *lisp_err;
 
-/* Heap and globals (LISP_DESIGN.md section 2) */
+/* Heap and globals (LISP_DESIGN.md section 2)
+ *
+ * Cell 0 is never allocated, so index 0 doubles as "none": MKREF(0) is NIL,
+ * which the collector relies on for its parent-link sentinel. */
 static cell heap[NCELLS];
-static uint16_t heap_top = 1;       /* allocation frontier; cell 0 is NIL */
-static uint16_t heap_mark = 1;      /* watermark after last good top form */
+static uint16_t free_list;          /* head of the free chain, 0 = empty */
+static uint16_t free_count;
 static val global_env = NIL;
 static uint8_t eval_depth;
 
-/* Forms read from the screen but not yet evaluated (section 5). A root in
- * its own right: the top-level safepoint runs between forms, and its
- * watermark predates the whole screen read, so without this the remaining
- * program would be collected out from under the loop. */
+/* Forms read from the screen but not yet evaluated (section 5). Marked as a
+ * root so a collection between forms cannot reclaim the rest of the
+ * program. */
 static val lisp_pending = NIL;
+
+static void lisp_gc(val extra1, val extra2);
 
 /* Screen mode (section 5): the framebuffer is the source buffer, so the
  * reader can take characters straight from video RAM instead of a line.
@@ -34,8 +38,18 @@ static uint8_t lisp_scr_y;
 
 void lisp_init(void)
 {
-    heap_top = 1;
-    heap_mark = 1;
+    uint16_t i;
+
+    /* Thread every cell but 0 onto the free list, lowest index first. */
+    free_list = 0;
+    free_count = 0;
+    for (i = NCELLS - 1; i >= 1; i--) {
+        heap[i].car = FREE_MARK;
+        heap[i].cdr = MKREF(free_list);
+        free_list = i;
+        free_count++;
+    }
+
     global_env = NIL;
     eval_depth = 0;
     lisp_err = 0;
@@ -44,21 +58,38 @@ void lisp_init(void)
     hw_init();
 }
 
-/* Allocation is a frontier bump: the copying collector (section 4) has no
- * free list, and every cell at or above heap_top is free. */
+/* Allocation pops the free list, collecting first if it is empty.
+ *
+ * Unlike the previous copying collector there is no safepoint discipline: a
+ * collection may happen at any allocation, because the mark phase scans the
+ * C stack (see lisp_gc) and so finds every local a caller is holding --
+ * including half-built structures such as the reader's list. */
 static val lisp_cons(val a, val d)
 {
-    if (heap_top >= NCELLS) {
-        /* Report exhaustion here rather than returning a bare NIL: callers
-         * that missed the check would otherwise carry a broken environment
-         * forward and fail later with a misleading "type" error. */
-        lisp_error("mem");
-        return NIL;
+    uint16_t i;
+
+    if (free_list == 0) {
+        /* a and d are live but not yet reachable from anything, so they are
+         * marked explicitly rather than relied upon being spilled. */
+        lisp_gc(a, d);
+
+        if (free_list == 0) {
+            /* Report exhaustion here rather than returning a bare NIL:
+             * callers that missed the check would otherwise carry a broken
+             * environment forward and fail later with a misleading "type"
+             * error. */
+            lisp_error("mem");
+            return NIL;
+        }
     }
 
-    heap[heap_top].car = a;
-    heap[heap_top].cdr = d;
-    return MKREF(heap_top++);
+    i = free_list;
+    free_list = REFIDX(heap[i].cdr);
+    free_count--;
+
+    heap[i].car = a;
+    heap[i].cdr = d;
+    return MKREF(i);
 }
 
 /* A ref whose car is a type marker is a symbol/closure, not a cons. */
@@ -199,7 +230,7 @@ static uint16_t lisp_sym_lo(val s)
 static val lisp_make_symbol(const char *s, uint8_t len)
 {
     uint16_t hi, lo;
-    val data;
+    val head, data;
 
     if (!lisp_pack_name(s, len, &hi, &lo)) {
         lisp_error("sym");
@@ -210,13 +241,22 @@ static val lisp_make_symbol(const char *s, uint8_t len)
         return lisp_cons(SYM_MARK, (val)hi);
     }
 
-    data = lisp_cons((val)hi, (val)lo);
-    if (data == NIL) {
-        lisp_error("mem");
+    /* Header first, then the raw {hi, lo} cell. Allocating the other way
+     * round would leave a bare data cell live across an allocation, where a
+     * collection would see two raw halves in the fields of what looks like
+     * an ordinary cons. */
+    head = lisp_cons(SYM2_MARK, NIL);
+    if (head == NIL) {
         return NIL;
     }
 
-    return lisp_cons(SYM2_MARK, data);
+    data = lisp_cons((val)hi, (val)lo);
+    if (data == NIL) {
+        return NIL;
+    }
+
+    heap[REFIDX(head)].cdr = data;
+    return head;
 }
 
 /* Builtin names live in flash and are matched at read time, so they never
@@ -555,162 +595,209 @@ static val lisp_assoc(val sym, val env)
     return NIL;
 }
 
-/* Garbage collector (section 4): watermark copying, iterative Cheney scan,
- * then a slide back down to the watermark.
+/* Garbage collector (section 4): mark-sweep, with Schorr-Waite pointer
+ * reversal for the mark phase and a conservative scan of the C stack for
+ * roots.
  *
- * The language creates no old-to-new heap stores (environments and argument
- * lists are built front-first or by recursion, and `define` updates a C
- * variable), so nothing below the watermark can reference anything at or
- * above it. That is what lets the collector ignore everything older than the
- * watermark instead of tracing the whole heap.
+ * Why not the previous copying collector: copying needs somewhere to copy
+ * to, so free cells had to be at least as many as live ones and barely half
+ * the heap was usable. Nothing moves here, so every cell can hold live data.
+ * Uniform 4-byte cells mean a non-moving collector cannot fragment: any free
+ * cell serves any request.
  *
- * The one exception is the reader, which appends at the tail of the list it
- * is building. No collection can occur while reading, so that is safe -- see
- * the note above lisp_read_list.
+ * Marking cannot recurse -- the interpreter already spends most of a 1.36 KB
+ * stack -- so it reverses pointers as it descends and restores them on the
+ * way back, using one mark bit and one direction bit per cell and no stack
+ * at all.
  *
- * Interrupts are never masked: the video ISR keeps running throughout,
- * including during the slide.
+ * Roots are the two globals, any values passed in explicitly, and whatever
+ * the C stack happens to hold. Scanning the stack conservatively is sound
+ * *because* nothing moves: a halfword that merely looks like a reference
+ * retains one cell for one cycle, which is harmless, whereas a moving
+ * collector would have to rewrite it and could not. It also means values
+ * held by outer eval frames need no registration: a callee-saved register
+ * live across a call is spilled by the callee's prologue, so it is on the
+ * stack by the time a collection runs.
  */
-static uint16_t gc_from;            /* watermark: cells below never move */
-static uint16_t gc_to;              /* start of to-space */
+static uint8_t gc_marks[(NCELLS + 7) / 8];
+static uint8_t gc_dirs[(NCELLS + 7) / 8];
 
-static val lisp_evacuate(val v)
+/* Top of the C stack, supplied by the platform (see lisp_set_stack_top). */
+static char *gc_stack_top;
+
+#define GC_MARKED(i)  (gc_marks[(i) >> 3] &   (uint8_t)(1u << ((i) & 7)))
+#define GC_SETMARK(i) (gc_marks[(i) >> 3] |=  (uint8_t)(1u << ((i) & 7)))
+#define GC_DIR(i)     (gc_dirs[(i) >> 3]  &   (uint8_t)(1u << ((i) & 7)))
+#define GC_SETDIR(i)  (gc_dirs[(i) >> 3]  |=  (uint8_t)(1u << ((i) & 7)))
+#define GC_CLRDIR(i)  (gc_dirs[(i) >> 3]  &= (uint8_t)~(1u << ((i) & 7)))
+
+void lisp_set_stack_top(void *top)
 {
-    uint16_t i, n;
-    cell c;
-
-    if (!ISREF(v)) {
-        return v;
-    }
-
-    i = REFIDX(v);
-    if (i < gc_from) {
-        return v;                   /* older than the watermark: pinned */
-    }
-
-    c = heap[i];
-    if (c.car == FWD_MARK) {
-        return c.cdr;               /* already copied; keep sharing intact */
-    }
-
-    n = heap_top;
-
-    if (c.car == SYM2_MARK) {
-        /* A long symbol is copied as a unit: header followed immediately by
-         * its {hi, lo} data cell, which holds raw packed groups and must be
-         * copied as a leaf rather than scanned as a pair of references. The
-         * scan below relies on that adjacency to step over it. Copying the
-         * data cell unconditionally can duplicate one below the watermark,
-         * which costs a cell but keeps the layout invariant. */
-        if (n + 2 > NCELLS) {
-            lisp_error("mem");
-            return v;
-        }
-        heap[n].car = SYM2_MARK;
-        heap[n].cdr = MKREF(n + 1);
-        heap[n + 1] = heap[REFIDX(c.cdr)];
-        heap_top = n + 2;
-    }
-    else {
-        if (n + 1 > NCELLS) {
-            lisp_error("mem");
-            return v;
-        }
-        heap[n] = c;
-        heap_top = n + 1;
-    }
-
-    heap[i].car = FWD_MARK;
-    heap[i].cdr = MKREF(n);
-    return MKREF(n);
+    gc_stack_top = (char *)top;
 }
 
-static val lisp_slide(val v, uint16_t delta)
+/* Whether a field holds a reference the collector should descend into.
+ *
+ * These stay correct while marking is in progress. Only a cons ever has its
+ * car reversed, and the parent link written there is a reference or NIL --
+ * never a marker -- so the cell still reads as a cons on the way back up.
+ * A symbol's cdr is a raw packed name and a SYM2 data cell holds two raw
+ * halves; neither is ever traced. */
+static uint8_t gc_traces_car(uint16_t i)
 {
-    if (ISREF(v) && REFIDX(v) >= gc_to) {
-        return (val)(v - (val)(delta << 2));
+    val c = heap[i].car;
+
+    if (ISIMM(c) && IMMSUB(c) == SUB_MK) {
+        return 0;                       /* symbol or closure header */
     }
-    return v;
+    return (uint8_t)ISREF(c);
 }
 
-static void lisp_gc(uint16_t watermark, val **roots, uint8_t nroots)
+static uint8_t gc_traces_cdr(uint16_t i)
 {
-    uint16_t scan, size, delta;
-    uint8_t k;
-    val a;
+    val c = heap[i].car;
 
-    gc_from = watermark;
-    gc_to = heap_top;
+    if (ISIMM(c) && IMMSUB(c) == SUB_MK) {
+        return (uint8_t)(c == CLO_MARK && ISREF(heap[i].cdr));
+    }
+    return (uint8_t)ISREF(heap[i].cdr);
+}
 
-    for (k = 0; k < nroots; k++) {
-        *roots[k] = lisp_evacuate(*roots[k]);
+/* Schorr-Waite: descend by reversing the field just followed, and use the
+ * direction bit to remember which field of a node the reversed link sits in.
+ * Index 0 is the "no parent" sentinel, which works because cell 0 is never
+ * allocated and MKREF(0) is NIL. */
+static void gc_mark(val root)
+{
+    uint16_t p, q, t;
+
+    if (!ISREF(root) || REFIDX(root) >= NCELLS) {
+        return;
     }
 
-    /* Breadth-first scan of to-space. Evacuating appends to heap_top, so the
-     * loop reaches newly copied cells without any recursion or stack. */
-    scan = gc_to;
-    while (scan < heap_top && !lisp_err) {
-        a = heap[scan].car;
+    p = REFIDX(root);
+    q = 0;
 
-        if (a == SYM_MARK) {
-            scan += 1;                              /* cdr is a raw name */
-        }
-        else if (a == SYM2_MARK) {
-            scan += 2;                              /* skip the data cell */
-        }
-        else if (a == CLO_MARK) {
-            heap[scan].cdr = lisp_evacuate(heap[scan].cdr);
-            scan += 1;
-        }
-        else {
-            heap[scan].car = lisp_evacuate(heap[scan].car);
-            heap[scan].cdr = lisp_evacuate(heap[scan].cdr);
-            scan += 1;
-        }
-    }
+    for (;;) {
+        if (p != 0 && !GC_MARKED(p)) {
+            GC_SETMARK(p);
+            GC_CLRDIR(p);
 
-    if (lisp_err) {
-        return;                     /* to-space overflowed; caller reports */
-    }
+            /* A long symbol's data cell is raw: mark it so the sweep keeps
+             * it, but never descend into it. */
+            if (heap[p].car == SYM2_MARK && ISREF(heap[p].cdr)
+             && REFIDX(heap[p].cdr) < NCELLS) {
+                GC_SETMARK(REFIDX(heap[p].cdr));
+            }
 
-    /* Slide the live block down onto the watermark. Destination is below
-     * source, so a forward copy is safe. */
-    size = heap_top - gc_to;
-    delta = gc_to - gc_from;
-
-    for (scan = 0; scan < size; scan++) {
-        heap[gc_from + scan] = heap[gc_to + scan];
-    }
-    heap_top = gc_from + size;
-
-    /* Patch references into the moved block by the constant slide delta;
-     * references below the watermark are already correct. */
-    scan = gc_from;
-    while (scan < heap_top) {
-        a = heap[scan].car;
-
-        if (a == SYM_MARK) {
-            scan += 1;
+            if (gc_traces_car(p)) {
+                t = REFIDX(heap[p].car);
+                heap[p].car = MKREF(q);
+                q = p;
+                p = t;
+                continue;
+            }
+            if (gc_traces_cdr(p)) {
+                GC_SETDIR(p);
+                t = REFIDX(heap[p].cdr);
+                heap[p].cdr = MKREF(q);
+                q = p;
+                p = t;
+                continue;
+            }
+            /* leaf: fall through and retreat */
         }
-        else if (a == SYM2_MARK) {
-            heap[scan].cdr = lisp_slide(heap[scan].cdr, delta);
-            scan += 2;
-        }
-        else if (a == CLO_MARK) {
-            heap[scan].cdr = lisp_slide(heap[scan].cdr, delta);
-            scan += 1;
-        }
-        else {
-            heap[scan].car = lisp_slide(heap[scan].car, delta);
-            heap[scan].cdr = lisp_slide(heap[scan].cdr, delta);
-            scan += 1;
-        }
-    }
 
-    for (k = 0; k < nroots; k++) {
-        *roots[k] = lisp_slide(*roots[k], delta);
+        for (;;) {
+            if (q == 0) {
+                return;
+            }
+
+            if (!GC_DIR(q)) {
+                if (gc_traces_cdr(q)) {
+                    /* finished the car, swing over to the cdr: the parent
+                     * link moves across and the car is restored */
+                    t = REFIDX(heap[q].cdr);
+                    heap[q].cdr = heap[q].car;
+                    heap[q].car = MKREF(p);
+                    GC_SETDIR(q);
+                    p = t;
+                    break;
+                }
+                t = REFIDX(heap[q].car);        /* pop, link was in car */
+                heap[q].car = MKREF(p);
+            }
+            else {
+                t = REFIDX(heap[q].cdr);        /* pop, link was in cdr */
+                heap[q].cdr = MKREF(p);
+            }
+
+            p = q;
+            q = t;
+        }
     }
 }
+
+/* Treat every halfword between here and the top of stack as a possible
+ * reference. False positives cost one retained cell for one cycle. */
+static void gc_scan_stack(void)
+{
+    volatile uint16_t here = 0;     /* only its address matters */
+    uint16_t *p = (uint16_t *)(void *)&here;
+    uint16_t *end = (uint16_t *)(void *)gc_stack_top;
+
+    if (end == 0) {
+        return;
+    }
+
+    while (p < end) {
+        val v = *p;
+
+        if (ISREF(v) && REFIDX(v) < NCELLS) {
+            gc_mark(v);
+        }
+        p++;
+    }
+}
+
+static void gc_sweep(void)
+{
+    uint16_t i;
+
+    free_list = 0;
+    free_count = 0;
+
+    for (i = NCELLS - 1; i >= 1; i--) {
+        if (!GC_MARKED(i)) {
+            /* FREE_MARK is a type marker, so a conservative hit on a free
+             * cell marks that one cell and stops: without it the collector
+             * would follow the free chain and retain the whole of it. */
+            heap[i].car = FREE_MARK;
+            heap[i].cdr = MKREF(free_list);
+            free_list = i;
+            free_count++;
+        }
+    }
+}
+
+static void lisp_gc(val extra1, val extra2)
+{
+    uint16_t i;
+
+    for (i = 0; i < sizeof gc_marks; i++) {
+        gc_marks[i] = 0;
+    }
+
+    gc_mark(global_env);
+    gc_mark(lisp_pending);
+    gc_mark(extra1);
+    gc_mark(extra2);
+    gc_scan_stack();
+
+    gc_sweep();
+}
+
+
 
 /* Builtins (section 6). Indices must match lisp_function_names[].
  *
@@ -963,7 +1050,11 @@ static val lisp_builtin(uint8_t idx, val args)
 
     case BI_ROOM:
     default:
-        return MKFIX((int16_t)(NCELLS - heap_top));
+        /* Collect first: without a collection the free count only says how
+         * much was left when the last allocation happened to run short,
+         * which tells the user nothing about how much they can still use. */
+        lisp_gc(NIL, NIL);
+        return MKFIX((int16_t)free_count);
     }
 }
 
@@ -1020,7 +1111,6 @@ static val lisp_bind(val params, val args, val env)
 static val lisp_eval(val x, val env)
 {
     val f, args, v;
-    uint16_t entry_top = heap_top;
 
     if (++eval_depth > MAXDEPTH) {
         lisp_error("deep");
@@ -1032,39 +1122,6 @@ static val lisp_eval(val x, val env)
         if (lisp_err) {
             x = NIL;
             goto done;
-        }
-
-        /* Safepoint (section 4). The watermark is this frame's entry
-         * frontier, so everything an outer C frame holds was allocated
-         * earlier and is pinned -- which is why no C code registers roots.
-         * Only x, env and the global environment are live here: f, args and
-         * v are dead at the loop head, and a tail call has already stored
-         * its results into x and env.
-         *
-         * The trigger guarantees the copy fits. Live data cannot exceed the
-         * region since the watermark, so collecting once that region has
-         * grown to the size of the remaining free space means to-space is
-         * always large enough. It also makes a tail-recursive loop collect
-         * at a steady interval rather than at a fixed occupancy.
-         */
-        if (heap_top > entry_top
-         && (uint16_t)(heap_top - entry_top) >= (uint16_t)(NCELLS - heap_top)) {
-            /* Static, not automatic: this array would otherwise add 16 bytes
-             * to every eval frame, and eval frames are what bound recursion
-             * depth on a 1.4 KB stack. Safe because a collection never runs
-             * inside another one. */
-            static val *roots[4];
-
-            roots[0] = &x;
-            roots[1] = &env;
-            roots[2] = &global_env;
-            roots[3] = &lisp_pending;
-            lisp_gc(entry_top, roots, 4);
-
-            if (lisp_err) {
-                x = NIL;
-                goto done;
-            }
         }
 
         /* Fixnums, nil, t, builtins and special forms evaluate to themselves;
@@ -1336,15 +1393,10 @@ void lisp_print(val v)
 /* REPL entry point, called once per submitted line: read, evaluate and print
  * each form on the line.
  *
- * Each form ends at the top-level safepoint (section 4): the watermark is the
- * frontier from before the form was read, and the global environment is the
- * only root, so everything the form allocated is reclaimed except what a
- * definition retained. The printed result does not survive, because it has
- * already been printed.
- *
- * Error recovery is the design's `fp = W0`, plus restoring the global
- * environment head: a form that defines something and then fails must not
- * leave the global alist pointing at cells the rewind has freed.
+ * There is no explicit collection here any more. Allocation collects when it
+ * runs out, and a form's garbage simply stops being reachable once the form
+ * has been printed. A failed form needs only its definitions rolled back:
+ * the cells it allocated become unreachable by the same argument.
  */
 void lisp_handle_input_line(const char *line)
 {
@@ -1373,7 +1425,6 @@ void lisp_handle_input_line(const char *line)
             console_print_string(lisp_err);
             console_print_char('\n');
             global_env = saved_env;
-            heap_top = heap_mark;
             return;
         }
 
@@ -1383,27 +1434,7 @@ void lisp_handle_input_line(const char *line)
 
         lisp_print(v);
         console_print_char('\n');
-
-        {
-            val *roots[1];
-
-            roots[0] = &global_env;
-            lisp_gc(heap_mark, roots, 1);
-
-            if (lisp_err) {
-                console_print_string("? ");
-                console_print_string(lisp_err);
-                console_print_char('\n');
-                global_env = saved_env;
-                heap_top = heap_mark;
-                return;
-            }
-        }
-
-        heap_mark = heap_top;
     }
-
-    heap_mark = heap_top;
 }
 
 static void lisp_report_error(void)
@@ -1421,13 +1452,10 @@ static void lisp_report_error(void)
  * underneath the reader. Pass one therefore consumes the entire screen into
  * a list of forms, and only then does pass two evaluate them.
  *
- * The whole program must fit in the heap as cells, because no collection can
- * run during reading (the list builder appends at the tail). A program too
- * large for the heap reports "mem".
- *
- * heap_mark is deliberately left alone until the end: keeping the watermark
- * below the form list lets each between-form collection reclaim that form's
- * garbage, and the final collection then reclaims the program itself.
+ * The form list is held in lisp_pending so that a collection during pass two
+ * keeps the part of the program still to run. Everything else the collector
+ * needs it finds on the C stack. The whole program must still fit in the
+ * heap as cells; one too large reports "mem".
  */
 void lisp_handle_screen(void)
 {
@@ -1476,7 +1504,6 @@ void lisp_handle_screen(void)
 
     if (lisp_err) {
         lisp_report_error();
-        heap_top = heap_mark;
         lisp_pending = NIL;
         return;
     }
@@ -1493,7 +1520,6 @@ void lisp_handle_screen(void)
             lisp_report_error();
             global_env = saved_env;
             lisp_pending = NIL;
-            heap_top = heap_mark;
             return;
         }
 
@@ -1501,36 +1527,10 @@ void lisp_handle_screen(void)
         console_print_char('\n');
 
         lisp_pending = lisp_cdr(lisp_pending);
-
-        {
-            val *roots[2];
-
-            roots[0] = &global_env;
-            roots[1] = &lisp_pending;
-            lisp_gc(heap_mark, roots, 2);
-
-            if (lisp_err) {
-                lisp_report_error();
-                global_env = saved_env;
-                lisp_pending = NIL;
-                heap_top = heap_mark;
-                return;
-            }
-        }
     }
 
+    /* Dropping the last reference is all that is needed: the program text
+     * becomes unreachable and the next allocation that runs short reclaims
+     * it. */
     lisp_pending = NIL;
-
-    /* final collection reclaims the program text itself */
-    {
-        val *roots[1];
-
-        roots[0] = &global_env;
-        lisp_gc(heap_mark, roots, 1);
-        if (lisp_err) {
-            lisp_report_error();
-        }
-    }
-
-    heap_mark = heap_top;
 }
