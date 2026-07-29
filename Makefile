@@ -2,7 +2,6 @@ all : flash
 
 TARGET:=main
 TARGET_MCU:=CH32V002
-ADDITIONAL_C_FILES:=video_textmode.c console_textmode.c basic_runtime.c lisp.c
 CH32FUN_PATH ?= ./ch32fun
 
 # The V002 family names TIM bits differently from the V003 (see v002_compat.h).

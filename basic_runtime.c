@@ -4,7 +4,7 @@
 #include "ch32fun.h"
 #include <stdint.h>
 
-#define BASIC_HEAP_BYTES        640
+#define BASIC_HEAP_BYTES        2048
 #define BASIC_FOR_STACK_DEPTH   4
 #define BASIC_GOSUB_STACK_DEPTH 4
 #define BASIC_NO_OFFSET         0xFFFFu

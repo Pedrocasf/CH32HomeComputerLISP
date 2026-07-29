@@ -1,5 +1,5 @@
 #include "video_textmode.h"
-
+#include "TIM.h"
 #include "ch32fun.h"
 #include "font_8x8_rowmajor.h"
 #include <stdint.h>
