@@ -316,10 +316,44 @@ Omitted by design, not by budget: mutation (`setq setcar setcdr while`) —
 it breaks the GC invariant. Omitted for budget: strings, floats, macros,
 `apply`, `let`, `cond`.
 
-If flash margin survives, the most valuable additions for a *home computer*
-are hardware builtins: `gpio`, `adc`, `delay`, `peek`/`poke`. Note that CH32
-peripheral addresses (0x4000_0000+) do not fit a 15-bit fixnum, so those must
-be base+offset against a flash table of peripheral bases.
+## 6a. Hardware primitives (done, +636 B)
+
+`pin` `out` `in` `adc` `ms`, behind `lisp_hw.h` so `lisp.c` stays free of
+ch32fun and host-testable. Pin numbering is flat: 0–7 = PA0–PA7,
+8–15 = PC0–PC7, 16–23 = PD0–PD7. Modes: 0 input, 1 output, 2 input pull-up,
+3 analog.
+
+**Port C is refused in full, not just its two video pins.** The video
+interrupt rewrites the whole of `GPIOC->CFGLR` on every scanline, so any user
+configuration there is silently overwritten within microseconds. PD1 is
+refused as well — it carries the single-wire debug console. A refused pin is
+an error (`? pin`), never a silent no-op.
+
+`in` returns `t`/`nil` rather than 1/0: only `nil` is false here, so a fixnum
+result would make `(if (in p) ...)` always take the true branch.
+
+**The ADC needed its own bring-up.** `funAnalogInit`/`funAnalogRead` follow
+the classic CH32V003 sequence — calibrate via `RSTCAL`/`CAL`, start with
+`ADC_SWSTART` — and on the V002 the conversion never completes, hanging the
+machine hard. This was found on hardware: the interpreter stopped mid-probe
+and the video ISR never started. `lisp_hw.c` follows ch32fun's own CH32V00x
+example instead (`ADC_FLAG_STRT`, no calibration), and the wait loop is
+**bounded** — a builtin that can wedge a home computer is worse than one that
+can fail, so an unconfigured channel returns `? pin` rather than spinning.
+
+Verified on hardware with video running throughout (148 fields per 3 s):
+
+```
+(pin 16 1) (out 16 1) (in 16)   -> t, 1, t      PD0 driven and read back
+(pin 14 1)                      -> ? pin        PC6 is the pixel stream
+(pin 18 3) (adc 3)              -> t, 588       PD2 analog, real conversion
+(ms 200) (room)                 -> nil, 382
+```
+
+Deliberately not implemented: `peek`/`poke`. CH32 peripheral addresses
+(0x4000_0000+) do not fit a 15-bit fixnum, so they would need to be
+base+offset against a flash table of peripheral bases — `(poke 'tim1 12 n)`
+— rather than raw addresses.
 
 ---
 
