@@ -234,36 +234,70 @@ loop variables short even though longer names now work.
 
 ---
 
-## 4. Garbage collection: watermark copying
+## 4. Garbage collection: mark-sweep, Schorr-Waite marking
 
-The language is **purely functional** — no `setq`, `setcar`, `setcdr`, no
-`while`; loops are tail calls. That guarantees an old cell can never point to
-a newer one and that no cycles exist, which is what makes sectorlisp-style
-watermark copying sound.
+Nothing moves, so every cell can hold live data. The previous collector
+copied, which meant free cells had to outnumber live ones and barely half the
+heap was usable; measured, a program can now retain **383 of 384 cells**
+instead of about 192. Uniform 4-byte cells make fragmentation impossible, so
+the usual argument against a non-moving collector does not apply here.
 
-- **Allocation** is a frontier bump. No free list, no mark bits, no side tables.
-- **Safepoints:** after each top-level form (roots: global env), and at
-  `eval`'s TCO loop head when the heap passes 7/8 full (roots: `{x, env}`).
-  C code never registers roots, so there is no `gc_push`/`gc_pop` discipline
-  to get wrong.
-- **Algorithm:** Cheney copy with forwarding pointers, then slide down to the
-  watermark and patch refs by a constant delta. Two deliberate upgrades over
-  sectorlisp's 40-byte version: the scan is **iterative** (a recursive copy
-  would blow this stack, which is already the project's weak point), and
-  **forwarding pointers** stop shared DAGs from being duplicated
-  exponentially — fatal on 384 cells.
-- **Error recovery is one store:** `fp = W0`.
-- **No interrupt masking anywhere**, including during the slide.
+- **Allocation** pops a free list. When it is empty the collector runs, and
+  if nothing is reclaimed the allocation reports `mem`.
+- **No safepoints.** A collection can happen at any allocation, because the
+  mark phase finds every local a caller is holding (below).
+- **Marking** is Schorr-Waite pointer reversal: the field just followed is
+  overwritten with the link back to the parent and restored on the way out,
+  using one mark bit and one direction bit per cell and **no stack at all**.
+  Recursive marking was never an option -- the interpreter already spends
+  most of a 1.3 KB stack.
+- **Sweeping** is one linear pass rebuilding the free list. Free cells are
+  given a marker `car` (`FREE_MARK`) so that a stray reference to one marks
+  that single cell instead of walking, and retaining, the whole free chain.
 
-This costs ~0.2–0.3 K of flash against ~0.8–1.0 K for mark-sweep, and saves
-~190 B of RAM (no mark/state bitmaps, no shadow stack). At 11.5 K total that
-saving is worth the loss of mutation.
+### Roots: conservative stack scanning
 
-Cost accepted: dead cells stay pinned until the enclosing eval returns, and an
-accumulator loop re-copies its result at each triggered safepoint (worst case
-quadratic). The 7/8 threshold keeps that rare.
+The globals and any values passed in explicitly are marked directly; beyond
+that the collector scans the C stack, treating every halfword that could be
+a cell reference as one.
 
----
+This is sound **because nothing moves**. A false positive retains one cell
+for one cycle; a moving collector would instead have to rewrite the value it
+found, which it cannot do without knowing it is really a pointer. It also
+removes the need for any root registration: a callee-saved register live
+across a call is spilled by the callee's prologue, so outer frames' values
+are already on the stack by the time a collection runs.
+
+The cost is a little imprecision. Occupancy after a long loop lands within a
+cell or two of a short one rather than exactly equal, which the tests allow
+for explicitly.
+
+`lisp_set_stack_top()` must be called once at startup -- `_eusrstack` on the
+target, the address of a local in `main` on the host.
+
+### What this bought and cost
+
+| | copying | mark-sweep |
+|---|---|---|
+| usable live cells (of 384) | ~192 | **383** |
+| flash | 11268 B | **11016 B** |
+| RAM | 2732 B | 2808 B (two 48 B bitmaps) |
+| stack high-water | 1120 B | **956 B** |
+| stack headroom | 244 B (18 %) | **332 B (26 %)** |
+
+Both smaller *and* shallower: the eval frame lost its safepoint bookkeeping,
+and Schorr-Waite marking needs no stack where the Cheney scan did.
+
+The language is still pure, but no longer *has* to be. The old collector
+depended on no cell ever pointing at a younger one; mark-sweep traces from
+roots regardless of age, so `setq`, `setcar`, `setcdr` and `while` are now
+implementable whenever they seem worth the flash.
+
+**One constraint the representation imposes**: a long symbol's `{hi, lo}`
+cell holds raw halves, both always >= 1600, which would decode as cell
+indices >= 400. Those must stay outside the heap for a stray conservative
+hit to be harmless, so `NCELLS` may not exceed 400 -- enforced by an `#error`
+in `lisp.h`.
 
 ## 5. The editor: the framebuffer *is* the source buffer
 

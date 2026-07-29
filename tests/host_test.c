@@ -119,6 +119,14 @@ static const char *screen_run(void)
     return out;
 }
 
+/* Cells in use, measured after a collection so the answer does not depend
+ * on when the last allocation happened to run short. */
+static uint16_t live_cells(void)
+{
+    lisp_gc(NIL, NIL);
+    return (uint16_t)(NCELLS - 1 - free_count);
+}
+
 static int fails;
 
 static void ok(int cond, const char *what)
@@ -202,9 +210,9 @@ static void symtrip(const char *name, int want_cells)
     int used;
 
     lisp_init();
-    before = heap_top;
+    before = (uint16_t)free_count;
     got = prn(sym(name));
-    used = (int)(heap_top - before);
+    used = (int)(before - free_count);
 
     snprintf(msg, sizeof msg, "symbol %s -> %s (%d cells, want %d)",
              name, got, used, want_cells);
@@ -213,6 +221,11 @@ static void symtrip(const char *name, int want_cells)
 
 int main(void)
 {
+    /* Stands in for _eusrstack. It must be a real stack address above every
+     * frame the tests go on to create, so it is taken here in main. */
+    char stack_anchor = 0;
+    lisp_set_stack_top(&stack_anchor + 1);
+
     lisp_init();
 
     /* ---- radix-40 packing ------------------------------------------- */
@@ -304,13 +317,27 @@ int main(void)
 
     /* ---- allocator must not run off the end of the heap -------------- */
     {
-        val v = NIL;
-        int n = 0;
-        while ((v = lisp_cons(NIL, NIL)) != NIL) {
-            n++;
+        /* Allocating garbage can no longer exhaust the heap -- the collector
+         * reclaims it -- so exhaustion requires retaining what is allocated.
+         * The count reached also measures how much of the heap is usable,
+         * which is the whole point of not copying: the previous collector
+         * needed free cells >= live cells and so capped out near half. */
+        val list = NIL;
+        int n;
+
+        lisp_init();
+        for (n = 0; n < NCELLS + 64; n++) {
+            val c = lisp_cons(MKFIX(1), list);
+            if (lisp_err) {
+                break;
+            }
+            list = c;
         }
-        ok(heap_top == NCELLS, "allocation stops exactly at NCELLS");
-        printf("  (heap exhausted after %d conses of %d cells)\n", n, NCELLS);
+
+        ok(lisp_err != 0, "retaining cells eventually reports mem");
+        ok(n > (NCELLS * 3) / 4, "far more than half the heap is usable");
+        printf("  (retained %d live cells of %d before mem)\n", n, NCELLS);
+        lisp_init();
     }
 
     /* ---- reader + evaluator ------------------------------------------ */
@@ -503,13 +530,17 @@ int main(void)
         lisp_init();
         reads("(define f (lambda (n) (if (= n 0) 'zero (f (- n 1)))))", "f");
         readback("(f 10)");
-        small = heap_top;
+        small = live_cells();
         readback("(f 5000)");
-        big = heap_top;
+        big = live_cells();
+        /* Occupancy must not grow with the iteration count. A cell or two
+         * of slack is expected and harmless: the stack scan is
+         * conservative, so a stale value that merely looks like a
+         * reference can retain one cell for one cycle. */
         snprintf(msg, sizeof msg,
-                 "constant heap: after (f 10) %u cells, after (f 5000) %u",
+                 "constant heap: %u live after (f 10), %u after (f 5000)",
                  small, big);
-        ok(small == big, msg);
+        ok(big <= small + 4, msg);
     }
 
     /* the collector must preserve sharing rather than duplicate it:
@@ -559,11 +590,21 @@ int main(void)
     reads("(g 5)", "5");
     err("(g 100)", "deep");
 
-    /* a failed form must not leave cells behind */
+    /* A failed form leaves garbage rather than rewinding a frontier, so the
+     * test is that the machine stays usable and the cells come back. */
     {
-        uint16_t before = heap_top;
+        uint16_t before;
+
         lisp_handle_input_line("(zzz 1 2 3)");
-        ok(heap_top == before, "frontier rewound after a failed form");
+        reads("(+ 1 2)", "3");
+
+        before = (uint16_t)free_count;
+        for (int i = 0; i < 200; i++) {
+            readback("(zzz 1 2 3)");        /* fails, allocating each time */
+        }
+        reads("(+ 1 2)", "3");
+        ok((uint16_t)free_count > (uint16_t)(before / 2),
+           "repeated failures do not leak the heap away");
     }
 
     /* tail calls must run in constant C stack and constant depth */
@@ -624,9 +665,9 @@ int main(void)
             lisp_init();
             screen_set(prog2, 3);
             screen_run();
-            after = heap_top;
+            after = live_cells();
             snprintf(msg, sizeof msg,
-                     "screen: program text reclaimed (%u cells retained)", after);
+                     "screen: program text reclaimed (%u cells still live)", after);
             ok(after < 40, msg);
         }
 
@@ -719,11 +760,12 @@ int main(void)
         static char msg[80];
         uint16_t before, after;
         readback("(bl 5)");
-        before = heap_top;
+        before = live_cells();
         readback("(bl 200)");
-        after = heap_top;
-        snprintf(msg, sizeof msg, "blink loop constant heap (%u vs %u)", before, after);
-        ok(before == after, msg);
+        after = live_cells();
+        snprintf(msg, sizeof msg,
+                 "blink loop constant heap (%u live vs %u)", before, after);
+        ok(after <= before + 4, msg);
     }
     reads("(bl 3)", "end");
 
