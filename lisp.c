@@ -2,6 +2,7 @@
 
 #include "console_textmode.h"
 #include "video_textmode.h"
+#include "lisp_hw.h"
 
 static void lisp_error(const char *msg);
 
@@ -40,6 +41,7 @@ void lisp_init(void)
     lisp_err = 0;
     lisp_pending = NIL;
     lisp_from_screen = 0;
+    hw_init();
 }
 
 /* Allocation is a frontier bump: the copying collector (section 4) has no
@@ -229,6 +231,7 @@ static const char *const lisp_function_names[] = {
     "eq", "atom", "consp", "numberp", "null", "not",
     "+", "-", "*", "/", "mod", "<", ">", "=",
     "print", "princ", "terpri", "room",
+    "pin", "out", "in", "adc", "ms",
 };
 
 #define NSPECIALS (sizeof lisp_special_names / sizeof lisp_special_names[0])
@@ -737,6 +740,11 @@ static void lisp_gc(uint16_t watermark, val **roots, uint8_t nroots)
 #define BI_PRINC 19
 #define BI_TERPRI 20
 #define BI_ROOM 21
+#define BI_PIN  22
+#define BI_OUT  23
+#define BI_IN   24
+#define BI_ADC  25
+#define BI_MS   26
 
 static int32_t lisp_fixarg(val v)
 {
@@ -890,6 +898,67 @@ static val lisp_builtin(uint8_t idx, val args)
 
     case BI_TERPRI:
         console_print_char('\n');
+        return NIL;
+
+    /* Hardware (lisp_hw.h). A refused pin is an error rather than a silent
+     * no-op: pins 8..15 are port C, which the video interrupt owns, and 17
+     * is the debug console. */
+    case BI_PIN:
+        x = lisp_fixarg(a);
+        if (lisp_err) {
+            return NIL;
+        }
+        /* second argument is a mode number; nil reads as input */
+        y = ISFIX(b) ? FIXVAL(b) : (b == NIL ? HW_IN : HW_OUT);
+        if (hw_mode((int16_t)x, (int16_t)y) < 0) {
+            lisp_error("pin");
+            return NIL;
+        }
+        return TEE;
+
+    case BI_OUT:
+        x = lisp_fixarg(a);
+        if (lisp_err) {
+            return NIL;
+        }
+        if (hw_write((int16_t)x, (int16_t)(b != NIL && b != MKFIX(0))) < 0) {
+            lisp_error("pin");
+            return NIL;
+        }
+        return b;
+
+    case BI_IN:
+        x = lisp_fixarg(a);
+        if (lisp_err) {
+            return NIL;
+        }
+        y = hw_read((int16_t)x);
+        if (y < 0) {
+            lisp_error("pin");
+            return NIL;
+        }
+        /* t/nil rather than 1/0: only nil is false here, so a fixnum result
+         * would make (if (in p) ...) always take the true branch. */
+        return y ? TEE : NIL;
+
+    case BI_ADC:
+        x = lisp_fixarg(a);
+        if (lisp_err) {
+            return NIL;
+        }
+        y = hw_adc((int16_t)x);
+        if (y < 0) {
+            lisp_error("pin");
+            return NIL;
+        }
+        return MKFIX((int16_t)y);
+
+    case BI_MS:
+        x = lisp_fixarg(a);
+        if (lisp_err) {
+            return NIL;
+        }
+        hw_delay_ms((int16_t)x);
         return NIL;
 
     case BI_ROOM:

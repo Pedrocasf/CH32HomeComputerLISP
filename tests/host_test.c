@@ -32,6 +32,53 @@ void console_print_string(const char *str)
 
 void console_prepare_input_row(void) {}
 
+/* Simulated hardware: mirrors the pin guard in lisp_hw.c so the refusal
+ * rules can be tested without a board. */
+static int8_t  sim_mode[24];
+static int8_t  sim_level[24];
+static int16_t sim_delay_total;
+
+static int16_t sim_usable(int16_t pin)
+{
+    if (pin < 0 || pin > 23) return -1;
+    if (pin >= 8 && pin <= 15) return -1;   /* port C: owned by video */
+    if (pin == 17) return -1;               /* PD1: debug console */
+    return pin;
+}
+
+void hw_init(void) {}
+
+int8_t hw_mode(int16_t pin, int16_t mode)
+{
+    if (sim_usable(pin) < 0) return -1;
+    sim_mode[pin] = (int8_t)mode;
+    return 0;
+}
+
+int8_t hw_write(int16_t pin, int16_t value)
+{
+    if (sim_usable(pin) < 0) return -1;
+    sim_level[pin] = value ? 1 : 0;
+    return 0;
+}
+
+int16_t hw_read(int16_t pin)
+{
+    if (sim_usable(pin) < 0) return -1;
+    return sim_level[pin];
+}
+
+int16_t hw_adc(int16_t channel)
+{
+    if (channel < 0 || channel > 9) return -1;
+    return (int16_t)(channel * 100);        /* deterministic fake reading */
+}
+
+void hw_delay_ms(int16_t ms)
+{
+    if (ms > 0) sim_delay_total += ms;
+}
+
 /* Stub framebuffer for screen mode: rows are space-padded like the real one. */
 static uint8_t fb[TEXT_ROWS][TEXT_COLS];
 
@@ -604,6 +651,81 @@ int main(void)
         screen_run();
         reads("(sq 4)", "16");
     }
+
+    /* ---- hardware primitives ----------------------------------------- */
+    lisp_init();
+
+    /* configure, drive, read back */
+    reads("(pin 16 1)", "t");            /* PD0 as output */
+    reads("(out 16 1)", "1");
+    reads("(in 16)",    "t");            /* t/nil, not 1/0 */
+    reads("(out 16 0)", "0");
+    reads("(in 16)",    "nil");
+    ok(sim_mode[16] == HW_OUT, "pin mode reached the driver");
+
+    /* nil second argument means input */
+    reads("(pin 0 nil)", "t");
+    ok(sim_mode[0] == HW_IN, "nil mode is input");
+    reads("(pin 0 2)",   "t");
+    ok(sim_mode[0] == HW_IN_PU, "mode 2 is input pull-up");
+    reads("(pin 18 3)",  "t");
+    ok(sim_mode[18] == HW_ANALOG, "mode 3 is analog input");
+
+    /* only nil is false, so (if (in p) ...) must work as written */
+    reads("(out 16 0)", "0");
+    reads("(if (in 16) 'hi 'lo)", "lo");
+    reads("(out 16 1)", "1");
+    reads("(if (in 16) 'hi 'lo)", "hi");
+
+    /* port C belongs to the video interrupt and must be refused outright */
+    err("(pin 8 1)",  "pin");
+    err("(pin 12 1)", "pin");            /* PC4: sync */
+    err("(pin 14 1)", "pin");            /* PC6: pixel stream */
+    err("(out 12 1)", "pin");
+    err("(in 12)",    "pin");
+
+    /* PD1 carries the debug console */
+    err("(pin 17 1)", "pin");
+    err("(out 17 1)", "pin");
+
+    /* out of range */
+    err("(pin 24 1)", "pin");
+    err("(pin -1 1)", "pin");
+    err("(pin 'a 1)", "type");
+
+    /* adc and ms */
+    reads("(adc 0)", "0");
+    reads("(adc 3)", "300");
+    err("(adc 10)",  "pin");
+    err("(adc -1)",  "pin");
+    {
+        static char msg[64];
+        sim_delay_total = 0;
+        readback("(ms 25)");
+        readback("(ms 5)");
+        readback("(ms -3)");             /* negative is a no-op */
+        snprintf(msg, sizeof msg, "ms accumulated %d (want 30)", sim_delay_total);
+        ok(sim_delay_total == 30, msg);
+    }
+
+    /* a blink loop must run in constant heap like any other tail recursion */
+    lisp_init();
+    reads("(pin 16 1)", "t");
+    reads("(define bl (lambda (n)"
+          "  (if (= n 0) 'end"
+          "    (progn (out 16 1) (ms 1) (out 16 0) (ms 1)"
+          "           (bl (- n 1))))))", "bl");
+    {
+        static char msg[80];
+        uint16_t before, after;
+        readback("(bl 5)");
+        before = heap_top;
+        readback("(bl 200)");
+        after = heap_top;
+        snprintf(msg, sizeof msg, "blink loop constant heap (%u vs %u)", before, after);
+        ok(before == after, msg);
+    }
+    reads("(bl 3)", "end");
 
     if (fails) {
         printf("%d test(s) FAILED\n", fails);

@@ -2,11 +2,8 @@ all : flash
 
 TARGET:=main
 TARGET_MCU:=CH32V002
+ADDITIONAL_C_FILES:=video_textmode.c console_textmode.c basic_runtime.c lisp.c lisp_hw.c
 CH32FUN_PATH ?= ./ch32fun
-
-# The V002 family names TIM bits differently from the V003 (see v002_compat.h).
-# Inert when building for CH32V003.
-EXTRA_CFLAGS+=-include v002_compat.h
 
 # The V002's QingKe V2C core has hardware multiply (Zmmul). ch32fun.mk only
 # enables it on gcc >= 13, but the WCH toolchain (riscv-wch-elf-gcc 12.2.0)
