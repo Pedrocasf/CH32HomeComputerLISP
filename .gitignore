@@ -1,5 +1,7 @@
 *.bin
 *.elf
+tests/host_test
+tests/host_test.exe
 *.elf.ltrans0.ltrans.su
 *.ext.bin
 *.hex
