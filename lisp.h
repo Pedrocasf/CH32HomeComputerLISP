@@ -14,23 +14,34 @@
 
 /* Non-tail eval/print/read nesting allowed before the "deep" error.
  *
- * Sized from measured frames and then verified on hardware by painting the
- * unused stack and reading back the high-water mark. With NCELLS at 384 the
- * gap between the end of .bss and the top of stack is 1380 bytes; one level
- * of non-tail evaluation costs lisp_eval (36 B) plus lisp_eval_args (20 B),
- * and the video interrupt handlers (48 + 40 B) land on top of whatever the
+ * Sized from measured frames rather than guessed, because this setting has
+ * already caused one stack overflow: the original 24 drove the stack into
+ * .bss, the same failure the README reports for the BASIC runtime.
+ *
+ * The gap between the end of .bss and the top of stack is 1284 bytes. One
+ * level of non-tail evaluation costs lisp_eval (32 B) plus lisp_eval_args
+ * (20 B, and another per extra argument); a collection can now happen at any
+ * allocation, so lisp_gc (20 B) and gc_mark (36 B) may sit on top of the
+ * deepest frame; break support adds poll_input (12 B) there too; and the
+ * video interrupt handlers (48 + 40 B) land on top of whatever the
  * interpreter is doing.
  *
- * Note this counts every eval entry, including the ones used to evaluate
- * arguments, so it is roughly a third larger than the depth of user
- * recursion it permits.
+ * Measured high-water on hardware at 14 was 956 bytes, leaving 332 spare.
+ * Two further levels cost 104-144 bytes of that, putting 16 at roughly
+ * 1100 bytes and ~180 spare -- about half the margin 14 gives.
  *
- * The original value of 24 did not fit: it drove the stack into .bss, the
- * same failure the README reports for the BASIC runtime. Raising this
- * further means lowering NCELLS to buy the stack space back.
+ * Note this counts every eval entry, including those used to evaluate
+ * arguments, so it is roughly a third larger than the depth of user
+ * recursion it permits: 16 allows about 13.
+ *
+ * CAVEAT: 16 is projected from frame sizes, not measured. The painted-stack
+ * check that caught the original overflow could not be run when this was
+ * raised because the programmer was unavailable. Re-run it before trusting
+ * this value; lower back to 14 if headroom is thin. Raising further means
+ * lowering NCELLS to buy the stack space back.
  */
 #ifndef MAXDEPTH
-#define MAXDEPTH 14
+#define MAXDEPTH 16
 #endif
 
 /* The collector treats a long symbol's {hi, lo} cell as raw data, but a
