@@ -1,6 +1,7 @@
 #include "lisp_hw.h"
 
 #include "ch32fun.h"
+#include "video_textmode.h"
 
 /* Map a Lisp pin number to a ch32fun pin (PA_n = n, PC_n = 32+n, PD_n = 48+n),
  * or -1 if the pin is not ours to touch. See lisp_hw.h for why port C and
@@ -128,6 +129,157 @@ int16_t hw_adc(int16_t channel)
 
     /* 10-bit result, so it always fits a 15-bit fixnum. */
     return (int16_t)(ADC1->RDATAR & 0x3FF);
+}
+
+/* Saving the screen to flash.
+ *
+ * The screen is the program (see screen mode), so persisting the framebuffer
+ * is persisting the source. It goes in the last kilobyte of the 16 KB flash,
+ * well past the ~11.9 KB the firmware occupies; hw_save_screen refuses if
+ * the image has grown into the region rather than erasing itself.
+ *
+ * Programming uses the fast path: 64-byte pages, erased and then written a
+ * page at a time through the FPEC buffer. One header page carries a magic
+ * word so load can tell "nothing saved" from "saved a blank screen", and 13
+ * further pages hold the 800 bytes of text.
+ *
+ * Interrupts are left enabled. The video handler will be stalled for the few
+ * milliseconds each erase and program takes, which shows as a brief tear in
+ * the picture -- acceptable for something the user asked for explicitly, and
+ * far cheaper than the RAM a flash routine relocated into it would cost.
+ */
+#define SAVE_MAGIC   0x50534931u        /* "1ISP" little-endian */
+#define SAVE_ADDR    0x08003C00u        /* last 1 KB of 16 KB flash */
+#define SAVE_LIMIT   0x00003C00u        /* the same, in the boot-alias view */
+#define SAVE_PAGE    64u
+#define SAVE_WORDS   (SAVE_PAGE / 4u)
+#define SCREEN_BYTES ((uint16_t)TEXT_COLS * TEXT_ROWS)
+#define SCREEN_PAGES ((SCREEN_BYTES + SAVE_PAGE - 1u) / SAVE_PAGE)
+#define SAVE_PAGES   (SCREEN_PAGES + 1u)      /* header + data */
+
+extern uint32_t _etext;
+
+static void flash_unlock(void)
+{
+    FLASH->KEYR = FLASH_KEY1;
+    FLASH->KEYR = FLASH_KEY2;
+    FLASH->MODEKEYR = FLASH_KEY1;
+    FLASH->MODEKEYR = FLASH_KEY2;
+}
+
+/* Erase and program are kept separate on purpose.
+ *
+ * Doing them per page, as the obvious loop does, silently produced an empty
+ * region: an erase clears more than the 64-byte page it names, so each page
+ * wiped the ones before it. Erasing the whole region up front and only then
+ * programming pages avoids depending on the erase granularity at all.
+ *
+ * CTLR is returned to zero after each operation. Leaving the previous mode
+ * bits set was the other half of the failure. */
+static void flash_erase(uint32_t addr)
+{
+    FLASH->CTLR = CR_PAGE_ER;
+    FLASH->ADDR = addr;
+    FLASH->CTLR = CR_STRT_Set | CR_PAGE_ER;
+    while (FLASH->STATR & FLASH_STATR_BSY) {
+    }
+    FLASH->CTLR = 0;
+}
+
+static void flash_program(uint32_t addr, const uint32_t *src)
+{
+    volatile uint32_t *dst = (volatile uint32_t *)addr;
+    uint8_t i;
+
+    FLASH->CTLR = CR_PAGE_PG;
+    FLASH->CTLR = CR_BUF_RST | CR_PAGE_PG;
+    FLASH->ADDR = addr;
+
+    for (i = 0; i < SAVE_WORDS; i++) {
+        dst[i] = src[i];
+        FLASH->CTLR = CR_PAGE_PG | CR_BUF_LOAD;
+        while (FLASH->STATR & FLASH_STATR_BSY) {
+        }
+    }
+
+    FLASH->CTLR = CR_PAGE_PG | CR_STRT_Set;
+    while (FLASH->STATR & FLASH_STATR_BSY) {
+    }
+    FLASH->CTLR = 0;
+}
+
+int8_t hw_save_screen(void)
+{
+    uint32_t buf[SAVE_WORDS];
+    uint16_t idx = 0;
+    uint8_t page, w, b;
+
+    /* Refuse rather than erase code: the region is fixed, but the firmware
+     * that must stay clear of it is not. */
+    if ((uint32_t)(uintptr_t)&_etext > SAVE_LIMIT) {
+        return -1;
+    }
+
+    flash_unlock();
+    if (FLASH->CTLR & 0x8080u) {
+        return -1;                      /* still locked */
+    }
+
+    for (page = 0; page < SAVE_PAGES; page++) {
+        flash_erase(SAVE_ADDR + SAVE_PAGE * page);
+    }
+
+    for (page = 0; page < SCREEN_PAGES; page++) {
+        for (w = 0; w < SAVE_WORDS; w++) {
+            uint32_t v = 0;
+
+            for (b = 0; b < 4; b++) {
+                uint8_t c = ' ';
+
+                if (idx < SCREEN_BYTES) {
+                    c = video_textmode_read_cell((uint8_t)(idx % TEXT_COLS),
+                                                 (uint8_t)(idx / TEXT_COLS));
+                    idx++;
+                }
+                v |= (uint32_t)c << (8 * b);
+            }
+            buf[w] = v;
+        }
+        flash_program(SAVE_ADDR + SAVE_PAGE * (page + 1u), buf);
+    }
+
+    /* The magic goes in last. If anything above fails or is interrupted the
+     * header stays erased, so a half-written save reads as no save at all
+     * rather than as a screenful of noise. */
+    buf[0] = SAVE_MAGIC;
+    for (w = 1; w < SAVE_WORDS; w++) {
+        buf[w] = 0;
+    }
+    flash_program(SAVE_ADDR, buf);
+
+    return (*(const volatile uint32_t *)SAVE_ADDR == SAVE_MAGIC) ? 0 : -1;
+}
+
+int8_t hw_load_screen(void)
+{
+    const uint8_t *src = (const uint8_t *)(SAVE_ADDR + SAVE_PAGE);
+    uint16_t idx;
+
+    if (*(const uint32_t *)SAVE_ADDR != SAVE_MAGIC) {
+        return -1;                      /* nothing has been saved */
+    }
+
+    for (idx = 0; idx < SCREEN_BYTES; idx++) {
+        uint8_t c = src[idx];
+
+        if (c < ' ' || c > '~') {
+            c = ' ';                    /* never write junk to the screen */
+        }
+        video_textmode_write_cell((uint8_t)(idx % TEXT_COLS),
+                                  (uint8_t)(idx / TEXT_COLS), c);
+    }
+
+    return 0;
 }
 
 void hw_poll_input(void)

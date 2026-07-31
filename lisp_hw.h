@@ -36,4 +36,10 @@ int16_t hw_read(int16_t pin);                 /* 0, 1, or -1 unusable  */
 int16_t hw_adc(int16_t channel);              /* 0..1023, or -1        */
 void    hw_delay_ms(int16_t ms);
 
+/* Persist the screen, which in screen mode is also the program, to the
+ * reserved page at the top of flash. 0 on success, -1 if the region is
+ * unavailable (save) or holds nothing (load). */
+int8_t  hw_save_screen(void);
+int8_t  hw_load_screen(void);
+
 #endif

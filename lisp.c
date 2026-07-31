@@ -301,6 +301,7 @@ static const char *const lisp_function_names[] = {
     "print", "princ", "terpri", "room",
     "pin", "out", "in", "adc", "ms",
     "apply", "map", "filter",
+    "save", "load",
 };
 
 #define NSPECIALS (sizeof lisp_special_names / sizeof lisp_special_names[0])
@@ -876,6 +877,8 @@ static void lisp_gc(val extra1, val extra2)
 #define BI_APPLY 27
 #define BI_MAP   28
 #define BI_FILTER 29
+#define BI_SAVE   30
+#define BI_LOAD   31
 
 /* The application half of eval, factored out so builtins can call user
  * functions. Defined below, next to bind and eval. */
@@ -1154,6 +1157,22 @@ static val lisp_builtin(uint8_t idx, val args)
         }
         hw_delay_ms((int16_t)x);
         return NIL;
+
+    /* The screen is the program, so these persist the framebuffer to the
+     * page reserved at the top of flash. */
+    case BI_SAVE:
+        if (hw_save_screen() < 0) {
+            lisp_error("sav");
+            return NIL;
+        }
+        return TEE;
+
+    case BI_LOAD:
+        if (hw_load_screen() < 0) {
+            lisp_error("nos");          /* nothing saved */
+            return NIL;
+        }
+        return TEE;
 
     case BI_ROOM:
     default:
