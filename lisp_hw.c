@@ -130,6 +130,14 @@ int16_t hw_adc(int16_t channel)
     return (int16_t)(ADC1->RDATAR & 0x3FF);
 }
 
+void hw_poll_input(void)
+{
+    /* Reaches handle_debug_input, which routes bytes to
+     * lisp_handle_run_control_byte while a program is running -- so this
+     * cannot re-enter the interpreter. */
+    poll_input();
+}
+
 void hw_delay_ms(int16_t ms)
 {
     if (ms <= 0) {

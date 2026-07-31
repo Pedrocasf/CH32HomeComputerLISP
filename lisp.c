@@ -36,6 +36,33 @@ static uint8_t lisp_from_screen;
 static uint8_t lisp_scr_x;
 static uint8_t lisp_scr_y;
 
+/* Break support.
+ *
+ * Nothing reads input while a program evaluates -- poll_input() runs in the
+ * foreground loop, and during a run the foreground is inside eval -- so the
+ * evaluator has to pump the input path itself. Without that, Esc can never
+ * arrive, and a tail-recursive loop runs in constant stack and constant heap
+ * and therefore forever: `(define l (lambda () (l)))` would need a reset.
+ *
+ * While lisp_running is set, main.c routes incoming bytes to
+ * lisp_handle_run_control_byte instead of the console, so polling here
+ * cannot re-enter the interpreter. */
+static uint8_t lisp_running;
+static volatile uint8_t lisp_break;
+static uint8_t lisp_poll_tick;
+
+uint8_t lisp_is_running(void)
+{
+    return lisp_running;
+}
+
+void lisp_handle_run_control_byte(uint8_t ch)
+{
+    if (ch == 0x1b) {                   /* Esc */
+        lisp_break = 1;
+    }
+}
+
 void lisp_init(void)
 {
     uint16_t i;
@@ -1127,6 +1154,21 @@ static val lisp_eval(val x, val env)
             goto done;
         }
 
+        /* Pump the input path occasionally so Esc can stop a runaway
+         * program. Every 64th trip keeps this responsive -- a loop turns
+         * over far faster than anyone can type -- while leaving the cost
+         * well under a percent. */
+        if ((++lisp_poll_tick & 63u) == 0u) {
+            hw_poll_input();
+
+            if (lisp_break) {
+                lisp_break = 0;
+                lisp_error("brk");
+                x = NIL;
+                goto done;
+            }
+        }
+
         /* Fixnums, nil, t, builtins and special forms evaluate to themselves;
          * so does a closure cell, which is a marker-headed heap object. */
         if (!ISREF(x)) {
@@ -1519,6 +1561,7 @@ void lisp_handle_input_line(const char *line)
     lisp_src = line;
     lisp_err = 0;
     eval_depth = 0;
+    lisp_break = 0;
 
     for (;;) {
         lisp_skip_space();
@@ -1530,7 +1573,9 @@ void lisp_handle_input_line(const char *line)
 
         v = lisp_read_form();
         if (!lisp_err && v != EOFV) {
+            lisp_running = 1;
             v = lisp_eval(v, NIL);
+            lisp_running = 0;
         }
 
         if (lisp_err) {
@@ -1579,6 +1624,7 @@ void lisp_handle_screen(void)
 
     lisp_err = 0;
     eval_depth = 0;
+    lisp_break = 0;
     lisp_pending = NIL;
     saved_env = global_env;
 
@@ -1627,7 +1673,9 @@ void lisp_handle_screen(void)
     while (lisp_is_cons(lisp_pending)) {
         saved_env = global_env;
 
+        lisp_running = 1;
         v = lisp_eval(lisp_car(lisp_pending), NIL);
+        lisp_running = 0;
 
         if (lisp_err) {
             lisp_report_error();

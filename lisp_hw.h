@@ -25,6 +25,11 @@
 #define HW_ANALOG 3     /* analog in, for hw_adc */
 
 void    hw_init(void);
+
+/* Pump the input path from inside a running program, so a break can be
+ * noticed. Nothing else in the interpreter reads input while evaluating. */
+void    hw_poll_input(void);
+
 int8_t  hw_mode(int16_t pin, int16_t mode);   /* 0 ok, -1 unusable pin */
 int8_t  hw_write(int16_t pin, int16_t value); /* 0 ok, -1 unusable pin */
 int16_t hw_read(int16_t pin);                 /* 0, 1, or -1 unusable  */
