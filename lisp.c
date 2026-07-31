@@ -300,6 +300,7 @@ static const char *const lisp_function_names[] = {
     "+", "-", "*", "/", "mod", "<", ">", "=",
     "print", "princ", "terpri", "room",
     "pin", "out", "in", "adc", "ms",
+    "apply", "map", "filter",
 };
 
 #define NSPECIALS (sizeof lisp_special_names / sizeof lisp_special_names[0])
@@ -814,6 +815,16 @@ static void lisp_gc(val extra1, val extra2)
 {
     uint16_t i;
 
+    /* Spill callee-saved registers into this frame before scanning.
+     *
+     * Scanning the stack alone is not enough: a caller's live value can sit
+     * in a callee-saved register and never be written to memory, because an
+     * intervening callee only saves the registers it happens to use. That is
+     * exactly how an accumulator held in eval's env got collected mid-loop,
+     * leaving a silently truncated list. This builtin exists for conservative
+     * collectors and puts those registers somewhere the scan can see them. */
+    __builtin_unwind_init();
+
     for (i = 0; i < sizeof gc_marks; i++) {
         gc_marks[i] = 0;
     }
@@ -862,6 +873,13 @@ static void lisp_gc(val extra1, val extra2)
 #define BI_IN   24
 #define BI_ADC  25
 #define BI_MS   26
+#define BI_APPLY 27
+#define BI_MAP   28
+#define BI_FILTER 29
+
+/* The application half of eval, factored out so builtins can call user
+ * functions. Defined below, next to bind and eval. */
+static val lisp_apply(val f, val args);
 
 static int32_t lisp_fixarg(val v)
 {
@@ -1017,6 +1035,65 @@ static val lisp_builtin(uint8_t idx, val args)
         console_print_char('\n');
         return NIL;
 
+    case BI_APPLY:
+        return lisp_apply(a, b);
+
+    /* map and filter share a walk: both call f on each element and build a
+     * fresh list. The result is appended at the tail, which is an old-to-new
+     * store -- fine now that the collector traces from roots rather than
+     * relying on cell age, and the part-built list is found on the C stack.
+     *
+     * Each element costs one level of MAXDEPTH, since lisp_apply evaluates
+     * the body with a plain recursive call. A map over a long list is
+     * therefore bounded by the list, not by nesting. */
+    case BI_MAP:
+    case BI_FILTER: {
+        val head = NIL;
+        val tail = NIL;
+        val rest = b;
+
+        while (lisp_is_cons(rest)) {
+            val item = lisp_car(rest);
+            val one;
+            val got;
+
+            one = lisp_cons(item, NIL);         /* one-element argument list */
+            if (lisp_err) {
+                return NIL;
+            }
+
+            got = lisp_apply(a, one);
+            if (lisp_err) {
+                return NIL;
+            }
+
+            if (idx == BI_FILTER) {
+                if (got == NIL) {
+                    rest = lisp_cdr(rest);
+                    continue;                   /* predicate said no */
+                }
+                got = item;                     /* keep the element itself */
+            }
+
+            one = lisp_cons(got, NIL);
+            if (lisp_err) {
+                return NIL;
+            }
+
+            if (head == NIL) {
+                head = one;
+            }
+            else {
+                heap[REFIDX(tail)].cdr = one;
+            }
+            tail = one;
+
+            rest = lisp_cdr(rest);
+        }
+
+        return head;
+    }
+
     /* Hardware (lisp_hw.h). A refused pin is an error rather than a silent
      * no-op: pins 8..15 are port C, which the video interrupt owns, and 17
      * is the debug console. */
@@ -1136,6 +1213,35 @@ static val lisp_bind(val params, val args, val env)
     }
 
     return env;
+}
+
+/* Call f with an argument list that has already been evaluated.
+ *
+ * This is eval's application path in a form a builtin can reach. It differs
+ * in one way that matters: the closure body is evaluated with an ordinary
+ * recursive call rather than looping, so it is not a tail call. eval keeps
+ * its own inline version precisely to preserve that property; this one
+ * exists for map, filter and apply, which are not tail positions anyway. */
+static val lisp_apply(val f, val args)
+{
+    if (ISIMM(f) && IMMSUB(f) == SUB_FN) {
+        return lisp_builtin((uint8_t)IMMPL(f), args);
+    }
+
+    if (ISREF(f) && heap[REFIDX(f)].car == CLO_MARK) {
+        val spec = heap[REFIDX(f)].cdr;     /* (params . (body . env)) */
+        val params = lisp_car(spec);
+        val body = lisp_car(lisp_cdr(spec));
+        val env = lisp_bind(params, args, lisp_cdr(lisp_cdr(spec)));
+
+        if (lisp_err) {
+            return NIL;
+        }
+        return lisp_eval(body, env);
+    }
+
+    lisp_error("call");
+    return NIL;
 }
 
 static val lisp_eval(val x, val env)

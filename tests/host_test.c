@@ -556,6 +556,57 @@ int main(void)
 
     err("(let ((1 2)) 3)", "syn");      /* binding name must be a symbol */
 
+    /* ---- apply, map, filter --------------------------------------- */
+    lisp_init();
+
+    reads("(apply + '(1 2 3))",                  "6");
+    reads("(apply cons '(1 2))",                 "(1 . 2)");
+    reads("(apply + nil)",                       "0");
+    reads("(apply (lambda (x y) (- x y)) '(10 3))", "7");
+    err("(apply 1 '(2))",                        "call");
+
+    reads("(map (lambda (x) (* x x)) '(1 2 3))", "(1 4 9)");
+    reads("(map car '((1 2) (3 4)))",            "(1 3)");
+    reads("(map (lambda (x) x) nil)",            "nil");
+    reads("(map numberp '(1 a))",                "(t nil)");
+
+    reads("(filter (lambda (x) (> x 2)) '(1 2 3 4))", "(3 4)");
+    reads("(filter numberp '(1 a 2))",           "(1 2)");
+    reads("(filter (lambda (x) nil) '(1 2))",    "nil");
+    reads("(filter (lambda (x) t) nil)",         "nil");
+
+    /* map and filter compose with closures over the enclosing scope */
+    reads("(define k 10)",                       "k");
+    reads("(map (lambda (x) (+ x k)) '(1 2))",   "(11 12)");
+    reads("(let ((b 100)) (map (lambda (x) (+ x b)) '(1 2)))", "(101 102)");
+
+    /* ---- regression: a live accumulator must survive collection ----
+     *
+     * A tail loop that conses onto an accumulator keeps that accumulator
+     * only in eval's env, which lives in a C local -- and a caller's local
+     * can sit in a callee-saved register that no intervening callee spills.
+     * The collector therefore missed it and reclaimed the list mid-loop,
+     * and (g 5000 nil) silently returned nine elements instead of
+     * reporting that it could not fit. lisp_gc now forces those registers
+     * onto the stack before scanning. */
+    lisp_init();
+    reads("(define g (lambda (n a) (if (= n 0) a (g (- n 1) (cons n a)))))", "g");
+    reads("(car (g 20 nil))",            "1");
+    reads("(car (g 150 nil))",           "1");   /* long enough to collect */
+    reads("(car (cdr (g 150 nil)))",     "2");
+    reads("(car (cdr (cdr (g 150 nil))))", "3");
+    err("(g 5000 nil)", "mem");          /* must report, not truncate */
+    reads("(+ 1 2)", "3");
+
+    /* the same hazard reached through map, whose result list is built in a
+     * C local while the collector may run */
+    lisp_init();
+    reads("(define g (lambda (n a) (if (= n 0) a (g (- n 1) (cons n a)))))", "g");
+    reads("(define l (g 60 nil))",       "l");
+    reads("(car l)",                     "1");
+    reads("(car (map (lambda (x) (+ x 0)) l))", "1");
+    reads("(car (filter numberp l))",    "1");
+
     /* ---- break: Esc must stop a running program ------------------- */
     lisp_init();
 

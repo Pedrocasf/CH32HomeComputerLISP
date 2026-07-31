@@ -264,9 +264,18 @@ a cell reference as one.
 This is sound **because nothing moves**. A false positive retains one cell
 for one cycle; a moving collector would instead have to rewrite the value it
 found, which it cannot do without knowing it is really a pointer. It also
-removes the need for any root registration: a callee-saved register live
-across a call is spilled by the callee's prologue, so outer frames' values
-are already on the stack by the time a collection runs.
+removes the need for any root registration.
+
+**Scanning the stack is not by itself enough, and assuming otherwise was a
+real bug.** A caller's live value can sit in a callee-saved register and
+never be written to memory: an intervening callee saves only the registers it
+happens to use, so `eval`'s `env` could stay in a register across the call to
+`lisp_cons` and be invisible to the scan. The collector then reclaimed a live
+accumulator mid-loop, and a tail loop building a list silently returned nine
+elements instead of reporting that it could not fit -- wrong answers, not a
+crash. `lisp_gc` now calls `__builtin_unwind_init()` first, which exists for
+conservative collectors and forces those registers into its own frame, where
+the scan sees them. `tests/host_test.c` pins this.
 
 The cost is a little imprecision. Occupancy after a long loop lands within a
 cell or two of a short one rather than exactly equal, which the tests allow
