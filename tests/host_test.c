@@ -102,6 +102,50 @@ uint8_t video_textmode_read_cell(uint8_t x, uint8_t y)
     return fb[y][x];
 }
 
+void video_textmode_write_cell(uint8_t x, uint8_t y, uint8_t ch)
+{
+    fb[y][x] = ch;
+}
+
+/* Simulated save region: mirrors the real one in holding a validity flag
+ * separate from the data, so "nothing saved" is distinguishable from
+ * "saved a blank screen". */
+static uint8_t sim_flash[TEXT_ROWS * TEXT_COLS];
+static uint8_t sim_flash_valid;
+static int8_t  sim_save_fails;
+
+int8_t hw_save_screen(void)
+{
+    int i;
+
+    if (sim_save_fails) {
+        return -1;
+    }
+    for (i = 0; i < TEXT_ROWS * TEXT_COLS; i++) {
+        sim_flash[i] = fb[i / TEXT_COLS][i % TEXT_COLS];
+    }
+    sim_flash_valid = 1;
+    return 0;
+}
+
+int8_t hw_load_screen(void)
+{
+    int i;
+
+    if (!sim_flash_valid) {
+        return -1;
+    }
+    for (i = 0; i < TEXT_ROWS * TEXT_COLS; i++) {
+        uint8_t c = sim_flash[i];
+
+        if (c < ' ' || c > '~') {
+            c = ' ';
+        }
+        fb[i / TEXT_COLS][i % TEXT_COLS] = c;
+    }
+    return 0;
+}
+
 /* Lay out program text on the fake screen, one source line per row. */
 static void screen_set(const char *const *rows, int nrows)
 {
@@ -606,6 +650,51 @@ int main(void)
     reads("(car l)",                     "1");
     reads("(car (map (lambda (x) (+ x 0)) l))", "1");
     reads("(car (filter numberp l))",    "1");
+
+    /* ---- save and load --------------------------------------------- */
+    lisp_init();
+    sim_flash_valid = 0;
+    sim_save_fails = 0;
+
+    /* loading before anything was saved is an error, not a blank screen */
+    err("(load)", "nos");
+
+    {
+        static const char *const prog[] = {
+            "(define sq (lambda (n)",
+            "  (* n n)))",
+            "(sq 9)",
+        };
+        static char msg[96];
+        const char *got;
+
+        screen_set(prog, 3);
+        reads("(save)", "t");
+
+        /* wipe the screen, then bring it back */
+        screen_set(prog, 0);
+        got = screen_run();
+        ok(!strcmp(got, ""), "blank screen runs nothing");
+
+        reads("(load)", "t");
+        lisp_init();
+        got = screen_run();
+        snprintf(msg, sizeof msg, "restored program runs -> %s", got);
+        ok(!strcmp(got, "sq|81"), msg);
+    }
+
+    /* a save failure is reported rather than silently ignored */
+    sim_save_fails = 1;
+    err("(save)", "sav");
+    sim_save_fails = 0;
+
+    /* saving a blank screen is distinguishable from never having saved */
+    {
+        static const char *const none[] = { "" };
+        screen_set(none, 0);
+        reads("(save)", "t");
+        reads("(load)", "t");           /* valid, just empty */
+    }
 
     /* ---- break: Esc must stop a running program ------------------- */
     lisp_init();
