@@ -619,8 +619,25 @@ riscv-wch-elf-nm --print-size --radix=d main.elf \
    | 16 | 13 | 1236 B | 128 B (9 %) |
    | **14** | **11** | **1120 B** | **244 B (18 %)** |
 
-   16 is available if depth matters more than margin; given this project's
-   history of stack overflow, 14 is the safer default. Note `MAXDEPTH` counts
+   **Later raised to 16** (user recursion depth 13). The figures in that row
+   were measured under the copying collector; mark-sweep then cut the
+   high-water at 14 from 1120 B to 956 B, which is what made 16 look
+   affordable again. Projected at 16 under the current build: two further
+   levels cost 104-144 B, putting it near 1100 B with roughly 180 B spare in
+   a 1284 B gap -- about half the margin 14 gives.
+
+   **That projection has not been checked on hardware.** The painted-stack
+   measurement that caught the original overflow could not be run when the
+   raise happened, because the programmer had stopped enumerating. Re-run it
+   before trusting the value, and drop back to 14 if the margin is thin:
+
+   ```
+   paint [_ebss, _eusrstack) with 0xA5A5A5A5 at boot, run the deepest
+   workload, then read RAM back and scan up from _ebss for the first
+   word that is no longer the pattern
+   ```
+
+   Note `MAXDEPTH` counts
    every eval entry including argument evaluation, so it is about a third
    larger than the user-visible recursion depth it allows.
 
