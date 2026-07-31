@@ -741,10 +741,11 @@ int main(void)
     lisp_init();
     reads("(define g (lambda (n) (if (= n 0) 0 (+ 1 (g (- n 1))))))", "g");
     reads("(g 5)", "5");
-    /* MAXDEPTH counts every eval entry, argument evaluation included, so 16
-     * buys about 13 levels of user recursion -- 12 failed with "deep" when
-     * this was 14. */
-    reads("(g 12)", "12");
+    /* MAXDEPTH counts every eval entry, argument evaluation included, so 14
+     * buys about 11 levels of user recursion. 16 would allow 12, but
+     * measured at only 96 bytes of stack headroom against 228 for 14. */
+    reads("(g 11)", "11");
+    err("(g 12)", "deep");
     err("(g 100)", "deep");
 
     /* A failed form leaves garbage rather than rewinding a frontier, so the
