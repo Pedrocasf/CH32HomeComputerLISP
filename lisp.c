@@ -264,6 +264,7 @@ static val lisp_make_symbol(const char *s, uint8_t len)
  * the immediate payload: index i becomes MKSF(i) / MKFN(i). */
 static const char *const lisp_special_names[] = {
     "quote", "if", "lambda", "define", "progn", "and", "or",
+    "cond", "let",
 };
 
 static const char *const lisp_function_names[] = {
@@ -552,6 +553,8 @@ static val lisp_read_form(void)
 #define SF_PROGN  4
 #define SF_AND    5
 #define SF_OR     6
+#define SF_COND   7
+#define SF_LET    8
 
 static val lisp_car(val v)
 {
@@ -1238,7 +1241,6 @@ static val lisp_eval(val x, val env)
                 continue;                                   /* tail call */
 
             case SF_OR:
-            default:
                 if (!lisp_is_cons(args)) {
                     x = NIL;
                     goto done;
@@ -1257,6 +1259,117 @@ static val lisp_eval(val x, val env)
                 }
                 x = lisp_car(args);
                 continue;                                   /* tail call */
+
+            /* (cond (test body...) (test body...) ...)
+             *
+             * The chosen clause's last expression is left in x so the loop
+             * takes it as a tail call: a cond arm costs no C stack, which
+             * matters because cond is how loops get written once nested if
+             * runs out of columns. */
+            case SF_COND: {
+                val clause = NIL;
+                val body;
+                uint8_t taken = 0;
+
+                while (lisp_is_cons(args)) {
+                    clause = lisp_car(args);
+                    v = lisp_eval(lisp_car(clause), env);
+                    if (lisp_err) {
+                        x = NIL;
+                        goto done;
+                    }
+                    if (v != NIL) {
+                        taken = 1;
+                        break;
+                    }
+                    args = lisp_cdr(args);
+                }
+
+                if (!taken) {
+                    x = NIL;                    /* no clause matched */
+                    goto done;
+                }
+
+                body = lisp_cdr(clause);
+                if (!lisp_is_cons(body)) {
+                    x = v;                      /* (cond (test)) yields test */
+                    goto done;
+                }
+                while (lisp_is_cons(lisp_cdr(body))) {
+                    lisp_eval(lisp_car(body), env);
+                    if (lisp_err) {
+                        x = NIL;
+                        goto done;
+                    }
+                    body = lisp_cdr(body);
+                }
+                x = lisp_car(body);
+                continue;                                   /* tail call */
+            }
+
+            /* (let ((name init) ...) body...)
+             *
+             * Initialisers are evaluated in the outer environment, so the
+             * bindings are parallel rather than sequential -- this is `let`,
+             * not `let*`, and one binding cannot see another.
+             *
+             * The part-built environment lives only in a C local, which is
+             * safe because the collector scans the stack; under the previous
+             * copying collector this would have needed rooting. */
+            case SF_LET: {
+                val binds = lisp_car(args);
+                val body = lisp_cdr(args);
+                val newenv = env;
+                val name;
+
+                while (lisp_is_cons(binds)) {
+                    val bind = lisp_car(binds);
+
+                    name = lisp_car(bind);
+                    if (!lisp_is_symbol(name)) {
+                        lisp_error("syn");
+                        x = NIL;
+                        goto done;
+                    }
+
+                    v = lisp_eval(lisp_car(lisp_cdr(bind)), env);
+                    if (lisp_err) {
+                        x = NIL;
+                        goto done;
+                    }
+
+                    v = lisp_cons(name, v);
+                    newenv = lisp_cons(v, newenv);
+                    if (lisp_err) {
+                        x = NIL;
+                        goto done;
+                    }
+
+                    binds = lisp_cdr(binds);
+                }
+
+                env = newenv;
+
+                if (!lisp_is_cons(body)) {
+                    x = NIL;
+                    goto done;
+                }
+                while (lisp_is_cons(lisp_cdr(body))) {
+                    lisp_eval(lisp_car(body), env);
+                    if (lisp_err) {
+                        x = NIL;
+                        goto done;
+                    }
+                    body = lisp_cdr(body);
+                }
+                x = lisp_car(body);
+                continue;                                   /* tail call */
+            }
+
+            default:
+                lisp_error("syn");
+                x = NIL;
+                goto done;
             }
         }
 

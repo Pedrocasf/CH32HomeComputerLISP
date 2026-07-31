@@ -498,6 +498,49 @@ int main(void)
     reads("(+ (* 2 3) (- 10 6))", "10");
     reads("(if (< 1 2) 'less 'more)", "less");
 
+    /* ---- cond ---------------------------------------------------- */
+    lisp_init();
+    reads("(cond (t 'a))",              "a");
+    reads("(cond (nil 'a) (t 'b))",     "b");
+    reads("(cond (nil 'a))",            "nil");   /* nothing matched */
+    reads("(cond)",                     "nil");
+    reads("(cond (t 1 2 3))",           "3");     /* body is a progn */
+    reads("(cond ((= 1 1) 'eq) (t 'no))", "eq");
+    reads("(cond ((= 1 2) 'eq) (t 'no))", "no");
+    reads("(cond (7))",                 "7");     /* clause with no body */
+    reads("(cond (nil 'a) ((+ 1 1) 'b))", "b");   /* only nil is false */
+
+    /* later clauses must not be evaluated once one is taken */
+    reads("(define n 0)",                        "n");
+    reads("(cond (t 'first) ((define n 9) 'x))", "first");
+    reads("n",                                   "0");
+
+    err("(cond (zzz 'a))", "unb");
+
+    /* ---- let ----------------------------------------------------- */
+    lisp_init();
+    reads("(let ((x 1)) x)",                "1");
+    reads("(let ((x 1) (y 2)) (+ x y))",    "3");
+    reads("(let () 'ok)",                   "ok");
+    reads("(let ((x 1)) 'a 'b)",            "b");     /* body is a progn */
+    reads("(let ((x 1)) (let ((x 2)) x))",  "2");     /* inner shadows */
+    reads("(let ((x 5)) (+ (let ((x 1)) x) x))", "6");
+
+    /* bindings are parallel, not sequential: init sees the outer x */
+    reads("(define x 10)",              "x");
+    reads("(let ((x 1) (y x)) y)",      "10");
+    reads("x",                          "10");   /* and the global is intact */
+
+    /* a let binding shadows a global only inside its body */
+    reads("(let ((x 2)) x)",  "2");
+    reads("x",                "10");
+
+    /* closures capture the let environment */
+    reads("(define mk (lambda () (let ((v 42)) (lambda () v))))", "mk");
+    reads("((mk))", "42");
+
+    err("(let ((1 2)) 3)", "syn");      /* binding name must be a symbol */
+
     /* ---- TCO: only provable now that we can count -------------------
      *
      * A tail-recursive countdown costs 7 cells per iteration (2 for
