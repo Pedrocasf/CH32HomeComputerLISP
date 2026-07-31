@@ -21,6 +21,14 @@ void handle_debug_input(int numbytes, uint8_t *data)
 {
     for (int i = 0; i < numbytes; i++) {
 #if USE_LISP
+        /* While a program is running the interpreter polls us from inside
+         * eval, so bytes must go to the break handler rather than the
+         * console -- otherwise this would re-enter the interpreter. */
+        if (lisp_is_running()) {
+            lisp_handle_run_control_byte(data[i]);
+            continue;
+        }
+
         /* Ctrl-R runs the whole screen as a program. Intercepted here so
          * console_textmode stays language-agnostic. */
         if (data[i] == 0x12) {

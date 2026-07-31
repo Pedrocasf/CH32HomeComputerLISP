@@ -79,6 +79,21 @@ void hw_delay_ms(int16_t ms)
     if (ms > 0) sim_delay_total += ms;
 }
 
+/* Simulated input pump. Setting sim_break_after makes Esc arrive that many
+ * polls into a run, which is how the break path is tested without a
+ * keyboard. */
+static int32_t sim_break_after;
+static int32_t sim_polls;
+
+void hw_poll_input(void)
+{
+    sim_polls++;
+    if (sim_break_after > 0 && sim_polls >= sim_break_after) {
+        sim_break_after = 0;
+        lisp_handle_run_control_byte(0x1b);
+    }
+}
+
 /* Stub framebuffer for screen mode: rows are space-padded like the real one. */
 static uint8_t fb[TEXT_ROWS][TEXT_COLS];
 
@@ -540,6 +555,50 @@ int main(void)
     reads("((mk))", "42");
 
     err("(let ((1 2)) 3)", "syn");      /* binding name must be a symbol */
+
+    /* ---- break: Esc must stop a running program ------------------- */
+    lisp_init();
+
+    /* A loop that is otherwise unstoppable: tail calls run in constant
+     * stack and, since the collector landed, constant heap too. Before
+     * break support this could only be escaped with a reset. */
+    reads("(define l (lambda () (l)))", "l");
+    sim_polls = 0;
+    sim_break_after = 5;
+    err("(l)", "brk");
+    ok(sim_break_after == 0, "break was delivered");
+
+    /* the machine is usable immediately afterwards */
+    reads("(+ 1 2)", "3");
+
+    /* a counted loop can be interrupted part-way and leaves no damage */
+    reads("(define f (lambda (n) (if (= n 0) 'end (f (- n 1)))))", "f");
+    sim_polls = 0;
+    sim_break_after = 3;
+    err("(f 16000)", "brk");
+    reads("(f 10)", "end");
+
+    /* a stale Esc must not kill the next line */
+    lisp_handle_run_control_byte(0x1b);
+    sim_break_after = 0;
+    reads("(+ 2 3)", "5");
+
+    /* bytes other than Esc do not break */
+    lisp_handle_run_control_byte('x');
+    reads("(f 10)", "end");
+
+    /* the running flag is only set while evaluating */
+    ok(!lisp_is_running(), "not running once a line is done");
+
+    /* polling really is periodic rather than every trip */
+    {
+        static char msg[80];
+        sim_polls = 0;
+        sim_break_after = 0;
+        readback("(f 200)");
+        snprintf(msg, sizeof msg, "polled %d times for 200 iterations", (int)sim_polls);
+        ok(sim_polls > 0 && sim_polls < 200, msg);
+    }
 
     /* ---- TCO: only provable now that we can count -------------------
      *

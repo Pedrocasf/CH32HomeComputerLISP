@@ -100,4 +100,9 @@ void lisp_print(val v);
 void lisp_handle_input_line(const char *line);
 void lisp_handle_screen(void);          /* Ctrl-R: run the whole screen */
 
+/* While a program runs, input must be routed here rather than to the
+ * console, so that Esc can break out of it. */
+uint8_t lisp_is_running(void);
+void lisp_handle_run_control_byte(uint8_t ch);
+
 #endif
