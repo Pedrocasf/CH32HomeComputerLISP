@@ -14,34 +14,33 @@
 
 /* Non-tail eval/print/read nesting allowed before the "deep" error.
  *
- * Sized from measured frames rather than guessed, because this setting has
- * already caused one stack overflow: the original 24 drove the stack into
- * .bss, the same failure the README reports for the BASIC runtime.
+ * Measured on hardware, by painting the unused stack at boot and reading the
+ * high-water mark back over SDI. This is not a setting to reason about from
+ * frame sizes: an earlier value of 24 drove the stack into .bss, the same
+ * failure the README reports for the BASIC runtime, and a later attempt at 16
+ * was projected to leave ~180 bytes spare but measured at 96.
  *
- * The gap between the end of .bss and the top of stack is 1284 bytes. One
- * level of non-tail evaluation costs lisp_eval (32 B) plus lisp_eval_args
- * (20 B, and another per extra argument); a collection can now happen at any
- * allocation, so lisp_gc (20 B) and gc_mark (36 B) may sit on top of the
- * deepest frame; break support adds poll_input (12 B) there too; and the
- * video interrupt handlers (48 + 40 B) land on top of whatever the
- * interpreter is doing.
+ *   MAXDEPTH   high-water   headroom in a 1284 B gap
+ *      14        1056 B       228 B  (18 %)
+ *      16        1188 B        96 B  ( 7 %)
  *
- * Measured high-water on hardware at 14 was 956 bytes, leaving 332 spare.
- * Two further levels cost 104-144 bytes of that, putting 16 at roughly
- * 1100 bytes and ~180 spare -- about half the margin 14 gives.
+ * 14 it is. 96 bytes is less than two video interrupt frames (48 + 40 B),
+ * and the measurement cannot guarantee one landed at the deepest instant, so
+ * the true margin at 16 may be nearer 48. Overflow here corrupts .bss
+ * silently rather than faulting, which is the wrong kind of cheap.
  *
- * Note this counts every eval entry, including those used to evaluate
- * arguments, so it is roughly a third larger than the depth of user
- * recursion it permits: 16 allows about 13.
+ * The worst case is plain non-tail recursion. Recursion through map or apply
+ * is *not* worse: those burn a level of this counter per lisp_apply frame, so
+ * they reach the limit sooner and peak lower (968 B, measured).
  *
- * CAVEAT: 16 is projected from frame sizes, not measured. The painted-stack
- * check that caught the original overflow could not be run when this was
- * raised because the programmer was unavailable. Re-run it before trusting
- * this value; lower back to 14 if headroom is thin. Raising further means
- * lowering NCELLS to buy the stack space back.
+ * Note this counts every eval entry, argument evaluation included, so it runs
+ * about a third ahead of the user recursion it permits: 14 allows about 11.
+ *
+ * Raising it means buying stack back by lowering NCELLS. Re-measure after any
+ * change that widens eval's frame.
  */
 #ifndef MAXDEPTH
-#define MAXDEPTH 16
+#define MAXDEPTH 14
 #endif
 
 /* The collector treats a long symbol's {hi, lo} cell as raw data, but a

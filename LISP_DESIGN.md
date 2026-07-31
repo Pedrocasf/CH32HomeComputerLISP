@@ -628,17 +628,27 @@ riscv-wch-elf-nm --print-size --radix=d main.elf \
    | 16 | 13 | 1236 B | 128 B (9 %) |
    | **14** | **11** | **1120 B** | **244 B (18 %)** |
 
-   **Later raised to 16** (user recursion depth 13). The figures in that row
-   were measured under the copying collector; mark-sweep then cut the
-   high-water at 14 from 1120 B to 956 B, which is what made 16 look
-   affordable again. Projected at 16 under the current build: two further
-   levels cost 104-144 B, putting it near 1100 B with roughly 180 B spare in
-   a 1284 B gap -- about half the margin 14 gives.
+   **Raised to 16, then measured and put back.** Mark-sweep cut the
+   high-water at 14 from 1120 B to 956 B, which made 16 look affordable, and
+   it was projected to leave ~180 B spare. Measured on hardware it left 96:
 
-   **That projection has not been checked on hardware.** The painted-stack
-   measurement that caught the original overflow could not be run when the
-   raise happened, because the programmer had stopped enumerating. Re-run it
-   before trusting the value, and drop back to 14 if the margin is thin:
+   | MAXDEPTH | user recursion depth | high-water | headroom in 1284 B |
+   |---|---|---|---|
+   | 16 | 12 | 1188 B | 96 B (7 %) |
+   | **14** | **11** | **1056 B** | **228 B (18 %)** |
+
+   96 bytes is less than two video interrupt frames (48 + 40 B), and the
+   measurement cannot guarantee one landed at the deepest instant, so the
+   true margin at 16 may be nearer 48. Overflow corrupts `.bss` silently
+   rather than faulting. Two extra levels of recursion is not worth that, so
+   14 stands.
+
+   Worth recording: recursion **through `map` or `apply` is not the worst
+   case**, which is the intuitive guess. Those burn a level of the counter
+   per `lisp_apply` frame, so they hit the limit sooner and peak lower
+   (968 B measured). Plain non-tail recursion is the case to size against.
+
+   The procedure, for whenever eval's frame changes:
 
    ```
    paint [_ebss, _eusrstack) with 0xA5A5A5A5 at boot, run the deepest
@@ -646,9 +656,8 @@ riscv-wch-elf-nm --print-size --radix=d main.elf \
    word that is no longer the pattern
    ```
 
-   Note `MAXDEPTH` counts
-   every eval entry including argument evaluation, so it is about a third
-   larger than the user-visible recursion depth it allows.
+   `MAXDEPTH` counts every eval entry including argument evaluation, so it is
+   about a third larger than the user-visible recursion depth it allows.
 
    `NCELLS` stays at 384. The stack was bought back by shrinking the frame
    rather than the heap, so no cells were sacrificed.
